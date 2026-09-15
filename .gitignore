@@ -1,0 +1,40 @@
+# ── Secrets & Environment ──
+.env
+
+# ── Strategy Runtime State & Logs ──
+state/
+logs/
+validation/data/
+validation/logs/
+
+# ── Python & Virtual Environments ──
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+
+# ── OS / IDE Artifacts ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ── Backtest Data, Scratch Scripts & Research Reports (Excluded for Execution) ──
+backtest.py
+backtest_report.txt
+backtest_report_comprehensive.md
+backtest_trades.csv
+calc_stats.py
+forensic_analysis.py
+forensic_report.md
+forensic_trades.csv
+multi_capital_backtest.py
+re_backtest_report.md
+testing.py
+*.png
+*.jpg
+*.jpeg
+*.csv
+!master_*.csv
