@@ -11,13 +11,23 @@ Gold trades 24/5 on a continuous market (Sunday 22:00 UTC to
 Friday 22:00 UTC) using standard 4-hour (H4) candle bars.
 """
 
+import json
 import logging
 import os
+import sys
 import threading
 from datetime import datetime, date, time as dtime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
+
+# Enable Windows ANSI VT100 processing for rich console logging
+if os.name == "nt":
+    try:
+        os.system("")
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # PATH SETUP
@@ -153,7 +163,14 @@ CONFIG = {
 #   logs/journal.csv
 
 class ISTFormatter(logging.Formatter):
-    """Log formatter that explicitly converts all timestamps to IST."""
+    """
+    Log formatter that explicitly converts all timestamps to IST (UTC+05:30)
+    and formats multiline log messages with aligned continuation indentation.
+    """
+
+    def __init__(self, fmt: Optional[str] = None, datefmt: Optional[str] = None, include_module: bool = False):
+        super().__init__(fmt, datefmt=datefmt)
+        self.include_module = include_module
 
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=IST)
@@ -161,28 +178,74 @@ class ISTFormatter(logging.Formatter):
             return dt.strftime(datefmt)
         return dt.strftime("%Y-%m-%d %H:%M:%S") + " IST"
 
+    def format(self, record: logging.LogRecord) -> str:
+        s = super().format(record)
+        if "\n" in s:
+            lines = s.split("\n")
+            first_line = lines[0]
+            msg_first_line = record.getMessage().split("\n")[0]
+            sep_idx = first_line.find(" | " + msg_first_line)
+            if sep_idx > 0:
+                indent = " " * sep_idx + " | "
+            else:
+                indent = " " * 31 + " | "
+            return first_line + "\n" + "\n".join(indent + line if line.strip() else "" for line in lines[1:])
+        return s
 
-def _make_formatter(include_module: bool = False) -> logging.Formatter:
-    """Build a log formatter with explicit IST timestamp."""
+
+class ConsoleColorFormatter(ISTFormatter):
+    """Log formatter with clean ANSI colors for interactive terminal output."""
+
+    COLORS = {
+        logging.DEBUG: "\033[90m",       # Dim Gray
+        logging.INFO: "\033[36m",        # Cyan
+        logging.WARNING: "\033[93m",     # Bright Yellow
+        logging.ERROR: "\033[91m",       # Bright Red
+        logging.CRITICAL: "\033[1;91m",  # Bold Red
+    }
+    RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        formatted = super().format(record)
+        if sys.stdout and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            color = self.COLORS.get(record.levelno, "")
+            if color:
+                return f"{color}{formatted}{self.RESET}"
+        return formatted
+
+
+def _make_formatter(include_module: bool = False, use_color: bool = False) -> logging.Formatter:
+    """Build a log formatter with explicit IST timestamp and optional terminal colors."""
     if include_module:
         fmt = "%(asctime)s | %(levelname)-5s | %(name)s | %(message)s"
     else:
         fmt = "%(asctime)s | %(levelname)-5s | %(message)s"
-    return ISTFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S IST")
+
+    if use_color:
+        return ConsoleColorFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S IST", include_module=include_module)
+    return ISTFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S IST", include_module=include_module)
 
 
 class AutoFlushRotatingFileHandler(RotatingFileHandler):
     """RotatingFileHandler that immediately flushes records to disk for real-time observability."""
+
     def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
-        self.flush()
+        try:
+            self.flush()
+        except Exception:
+            pass
 
 
 class AutoFlushFileHandler(logging.FileHandler):
     """FileHandler that immediately flushes records to disk for real-time observability."""
+
     def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
-        self.flush()
+        try:
+            self.flush()
+        except Exception:
+            pass
 
 
 def _add_file_handler(
@@ -238,12 +301,14 @@ def rollover_logging(new_date_str: str) -> None:
         trade_logger = logging.getLogger(f"{LOGGER_NAME}.trades")
         candle_logger = logging.getLogger(f"{LOGGER_NAME}.candles")
         network_logger = logging.getLogger(f"{LOGGER_NAME}.network")
+        broker_logger = logging.getLogger(f"{LOGGER_NAME}.broker")
 
         # 1. Remove old file handlers cleanly
         _remove_file_handlers(root_logger)
         _remove_file_handlers(trade_logger)
         _remove_file_handlers(candle_logger)
         _remove_file_handlers(network_logger)
+        _remove_file_handlers(broker_logger)
 
         # 2. Main strategy log (INFO+) & Full debug log (DEBUG+)
         _add_file_handler(
@@ -290,7 +355,8 @@ def rollover_logging(new_date_str: str) -> None:
                 "is_bullish,is_bearish,body_size,upper_wick,lower_wick"
             )
 
-        # 5. Dedicated Network/API log (DEBUG)
+        # 5. Dedicated Network & MT5 Broker API log (DEBUG+)
+        # Receives all MT5 API calls, rates fetching, tick polling, and connection status
         network_fh = AutoFlushRotatingFileHandler(
             daily_log_dir / "network.log",
             maxBytes=CONFIG["log_max_bytes"],
@@ -300,8 +366,83 @@ def rollover_logging(new_date_str: str) -> None:
         network_fh.setLevel(logging.DEBUG)
         network_fh.setFormatter(_make_formatter(include_module=True))
         network_logger.addHandler(network_fh)
+        broker_logger.addHandler(network_fh)
 
         root_logger.info("[STARTUP] 📂 Strategy logging initialized for trading date %s (Folder: %s)", clean_date_str, daily_log_dir)
+
+
+def flush_all_logs() -> None:
+    """Flush all active file handlers across the logging hierarchy to guarantee data persistence."""
+    with _logging_lock:
+        for name in (
+            LOGGER_NAME,
+            f"{LOGGER_NAME}.trades",
+            f"{LOGGER_NAME}.candles",
+            f"{LOGGER_NAME}.network",
+            f"{LOGGER_NAME}.broker",
+            f"{LOGGER_NAME}.pattern",
+            f"{LOGGER_NAME}.risk",
+            f"{LOGGER_NAME}.orders",
+        ):
+            l = logging.getLogger(name)
+            for h in list(l.handlers):
+                try:
+                    h.flush()
+                except Exception:
+                    pass
+
+
+def install_exception_hooks() -> None:
+    """
+    Install system-wide exception hooks for sys.excepthook and threading.excepthook
+    so ANY unhandled crash in any thread is forensically recorded in strategy.log and debug.log.
+    """
+    root_log = logging.getLogger(LOGGER_NAME)
+
+    def _sys_hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        root_log.critical("[CRASH] 🚨 Uncaught system exception:", exc_info=(exc_type, exc_value, exc_tb))
+        flush_all_logs()
+
+    def _thread_hook(args):
+        if issubclass(args.exc_type, KeyboardInterrupt):
+            return
+        root_log.critical(
+            f"[CRASH] 🚨 Uncaught exception in thread '{args.thread.name}':",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        flush_all_logs()
+
+    sys.excepthook = _sys_hook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_hook
+
+
+def log_event(event_type: str, data: Dict[str, Any]) -> None:
+    """
+    Log an atomic structured event to logs/YYYY-MM-DD/events.jsonl.
+    Provides machine-readable forensic audit trail for analytics, dashboards, and automated monitoring.
+    """
+    clean_date_str = today_ist().isoformat()
+    daily_log_dir = LOG_DIR / clean_date_str
+    daily_log_dir.mkdir(exist_ok=True)
+    jsonl_path = daily_log_dir / "events.jsonl"
+
+    record = {
+        "timestamp": now_ist().isoformat(),
+        "event": event_type,
+        "symbol": CONFIG.get("symbol", "XAUUSD"),
+        **data,
+    }
+    with _logging_lock:
+        try:
+            with jsonl_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, default=str) + "\n")
+                f.flush()
+        except Exception as e:
+            logging.getLogger(LOGGER_NAME).warning("[LOGGING] ⚠️ Failed to write to events.jsonl: %s", e)
 
 
 def setup_logging() -> logging.Logger:
@@ -315,6 +456,7 @@ def setup_logging() -> logging.Logger:
       Gold4HrReversal.broker   — MT5 broker API interactions
       Gold4HrReversal.trades   — trade-only filtered log
       Gold4HrReversal.candles  — raw candle CSV log
+      Gold4HrReversal.network  — isolated network/broker API log
     """
     root_logger = logging.getLogger(LOGGER_NAME)
     if root_logger.handlers:
@@ -325,10 +467,10 @@ def setup_logging() -> logging.Logger:
 
     today = today_ist().isoformat()
 
-    # Console handler (respects CONFIG log_level)
-    ch = logging.StreamHandler()
+    # Console handler (respects CONFIG log_level and renders ANSI colors if interactive)
+    ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(getattr(logging, CONFIG["log_level"], logging.INFO))
-    ch.setFormatter(_make_formatter(include_module=False))
+    ch.setFormatter(_make_formatter(include_module=False, use_color=True))
     root_logger.addHandler(ch)
 
     trade_logger = logging.getLogger(f"{LOGGER_NAME}.trades")
@@ -339,6 +481,7 @@ def setup_logging() -> logging.Logger:
     network_logger.propagate = False
 
     rollover_logging(today)
+    install_exception_hooks()
     return root_logger
 
 

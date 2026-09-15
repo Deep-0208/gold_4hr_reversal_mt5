@@ -16,7 +16,7 @@ import threading
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from config import CONFIG, log, log_orders, log_trades, now_ist
+from config import CONFIG, log, log_orders, log_trades, log_event, now_ist
 from broker import MT5Broker, TickData
 from risk import RiskParams, calculate_dollar_pnl
 from state import save_state, append_trade_journal
@@ -157,6 +157,16 @@ class OrderManager:
                 f"SL: ${sl:.2f} | TP: ${tp:.2f} | "
                 f"Risk: ${risk_params.risk:.2f} | Mode: {self._mode}"
             )
+            log_event("TRADE_ENTRY", {
+                "ticket": ticket,
+                "direction": direction,
+                "fill_price": fill_price,
+                "sl_price": sl,
+                "target_price": tp,
+                "risk": risk_params.risk,
+                "lot_size": self._lot_size,
+                "mode": self._mode,
+            })
             return True
 
     # ─────────────────────────────────────────
@@ -265,6 +275,15 @@ class OrderManager:
                 f"[EXIT] {direction} ({reason}) | Entry: ${entry_price:.2f} | "
                 f"Exit: ${exit_price:.2f} | P&L: ${pnl:+,.2f} | Mode: {self._mode}"
             )
+            log_event("TRADE_EXIT", {
+                "ticket": pos.get("ticket"),
+                "direction": direction,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "pnl": pnl,
+                "reason": reason,
+                "mode": self._mode,
+            })
 
             # Dispatch Telegram exit notification for all exits
             try:
@@ -510,6 +529,15 @@ class OrderManager:
                 f"[EXTERNAL EXIT] {pos['direction']} ({exit_reason}) | "
                 f"Entry: ${pos['entry_price']:.2f} | Exit: ${exit_price:.2f} | P&L: ${profit:+,.2f}"
             )
+            log_event("EXTERNAL_EXIT", {
+                "ticket": ticket,
+                "direction": pos["direction"],
+                "entry_price": pos["entry_price"],
+                "exit_price": exit_price,
+                "pnl": profit,
+                "reason": exit_reason,
+                "mode": self._mode,
+            })
 
             # Dispatch Telegram Notification
             if tg:

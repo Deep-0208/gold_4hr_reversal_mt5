@@ -31,7 +31,7 @@ from datetime import datetime, timezone, timedelta
 
 from config import (
     CONFIG, log, log_broker, now_ist, now_utc, rollover_logging, today_ist, IST,
-    log_candle_csv,
+    log_candle_csv, log_event, flush_all_logs,
 )
 from broker import MT5Broker
 from pattern import detect_setup, format_pattern_eval_summary, evaluate_prospective_setup
@@ -345,6 +345,11 @@ def run_strategy():
                     "Daily counters reset (trades_today=0, realized_pnl_today=$0.00).",
                     new_date
                 )
+                log_event("DAY_ROLLOVER", {
+                    "new_date": new_date,
+                    "trades_today": 0,
+                    "realized_pnl_today": 0.0,
+                })
 
             # ── Non-blocking weekend guard ──
             if _is_weekend():
@@ -466,6 +471,16 @@ def run_strategy():
 
                 # ── Guaranteed write of every completed H4 candle to candles.csv ──
                 log_candle_csv("COMPLETED_H4", CONFIG["symbol"], latest_candle)
+                log_event("CANDLE_CLOSED", {
+                    "period_start": dt_ist_str,
+                    "period_end": close_ist_str,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": vol,
+                    "color": color,
+                })
 
                 # ── Pattern detection ──────────────────
                 signal = detect_setup(candles, log_csv=True)
@@ -475,6 +490,11 @@ def run_strategy():
                 log.info(eval_summary)
 
                 if signal is not None:
+                    log_event("SIGNAL_DETECTED", {
+                        "pattern": signal.pattern_name,
+                        "direction": signal.direction,
+                        "c3_close": c,
+                    })
                     # ── Opposite signal check ──────────────
                     if state.get("in_position") and state.get("current_position"):
                         current_dir = state["current_position"]["direction"]
@@ -632,6 +652,7 @@ def run_strategy():
         raise
     finally:
         broker.disconnect()
+        flush_all_logs()
         log.info("[SHUTDOWN] ✅ Bot cleanly shut down.")
 
 
