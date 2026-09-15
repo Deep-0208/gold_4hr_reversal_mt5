@@ -275,6 +275,21 @@ def append_trade_journal(row: Dict[str, Any]) -> None:
         journal_file = LOG_DIR / "journal.csv"
         new_file = not journal_file.exists() or journal_file.stat().st_size == 0
 
+        # Guard against duplicate journal entry for the same ticket
+        ticket = row.get("ticket")
+        if not new_file and ticket:
+            try:
+                with journal_file.open("r", encoding="utf-8") as rf:
+                    reader = csv.DictReader(rf)
+                    if any(str(r.get("ticket")) == str(ticket) for r in reader):
+                        log.warning(
+                            f"[ORDER EXEC] ⚠️ Ticket {ticket} is already recorded in {journal_file.name}. "
+                            "Skipping duplicate journal append."
+                        )
+                        return
+            except Exception as e:
+                log.warning(f"[ORDER EXEC] ⚠️ Could not verify journal duplicates: {e}")
+
         with journal_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
                 f,

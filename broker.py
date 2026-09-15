@@ -141,7 +141,8 @@ class MT5Broker:
         # Quick health check via terminal_info
         info = mt5.terminal_info()
         if info is None:
-            log_broker.warning("[BROKER] ⚠️ MT5 connection lost. Attempting reconnect...")
+            err = mt5.last_error() if IS_WINDOWS else "Not Windows"
+            log_broker.warning("[BROKER] ⚠️ MT5 connection lost (Error: %s). Attempting reconnect...", err)
             self._connected = False
             return self.connect()
         return True

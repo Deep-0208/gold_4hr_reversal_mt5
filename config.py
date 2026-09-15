@@ -171,6 +171,20 @@ def _make_formatter(include_module: bool = False) -> logging.Formatter:
     return ISTFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S IST")
 
 
+class AutoFlushRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that immediately flushes records to disk for real-time observability."""
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
+class AutoFlushFileHandler(logging.FileHandler):
+    """FileHandler that immediately flushes records to disk for real-time observability."""
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
 def _add_file_handler(
     logger: logging.Logger,
     filename: str,
@@ -178,8 +192,8 @@ def _add_file_handler(
     level: int = logging.DEBUG,
     include_module: bool = False,
 ) -> None:
-    """Add a rotating file handler to a logger."""
-    fh = RotatingFileHandler(
+    """Add an auto-flushing rotating file handler to a logger."""
+    fh = AutoFlushRotatingFileHandler(
         directory / filename,
         maxBytes=CONFIG["log_max_bytes"],
         backupCount=CONFIG["log_backup_count"],
@@ -248,7 +262,7 @@ def rollover_logging(new_date_str: str) -> None:
         )
 
         # 3. Trade-only log (INFO, filtered)
-        trade_fh = RotatingFileHandler(
+        trade_fh = AutoFlushRotatingFileHandler(
             daily_log_dir / "trades.log",
             maxBytes=CONFIG["log_max_bytes"],
             backupCount=CONFIG["log_backup_count"],
@@ -259,7 +273,7 @@ def rollover_logging(new_date_str: str) -> None:
         trade_logger.addHandler(trade_fh)
 
         # 4. Candle CSV logger
-        candle_fh = logging.FileHandler(
+        candle_fh = AutoFlushFileHandler(
             daily_log_dir / "candles.csv",
             mode="a",
             encoding="utf-8",
@@ -277,7 +291,7 @@ def rollover_logging(new_date_str: str) -> None:
             )
 
         # 5. Dedicated Network/API log (DEBUG)
-        network_fh = RotatingFileHandler(
+        network_fh = AutoFlushRotatingFileHandler(
             daily_log_dir / "network.log",
             maxBytes=CONFIG["log_max_bytes"],
             backupCount=CONFIG["log_backup_count"],

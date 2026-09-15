@@ -300,6 +300,7 @@ def run_strategy():
 
     _current_date = today_ist().isoformat()
     last_heartbeat_time = 0.0
+    last_in_position_hb_time = 0.0
     alert_15m_sent = False
     alert_5m_sent = False
 
@@ -355,6 +356,7 @@ def run_strategy():
             if state.get("in_position") and state.get("current_position"):
                 # 1. First: check if position was closed externally in MT5 (App/Terminal/SL-TP)
                 if order_mgr.reconcile_external_exit(state, tg=tg):
+                    last_in_position_hb_time = 0.0
                     log.info("[POSITION] External exit reconciled. Resuming candle monitoring.")
                     continue
 
@@ -367,6 +369,7 @@ def run_strategy():
 
                     exited = order_mgr.check_exit_conditions(state, check_price)
                     if exited:
+                        last_in_position_hb_time = 0.0
                         log.info("[POSITION] Position exited. Resuming candle monitoring.")
 
                     # Heartbeat update (every 60s)
@@ -381,6 +384,22 @@ def run_strategy():
                         except (ValueError, TypeError):
                             pos["last_heartbeat"] = now.isoformat()
                             save_state(state)
+
+                    # Periodic in-trade heartbeat log (every 15 minutes) for server observability
+                    now_ts = time.time()
+                    if (now_ts - last_in_position_hb_time) >= 900:
+                        last_in_position_hb_time = now_ts
+                        entry = pos.get("entry_price", 0.0)
+                        diff = (check_price - entry) if direction == "LONG" else (entry - check_price)
+                        est_profit = diff * pos.get("lot_size", CONFIG.get("lot_size", 0.01)) * 100.0
+                        emoji = "🟢" if est_profit >= 0 else "🔴"
+                        log.info(
+                            "[IN POSITION] ⏳ Monitoring %s ticket #%s | Current: $%.2f | Entry: $%.2f | "
+                            "SL: $%.2f | TP: $%.2f | Est. P&L: %s $%.2f",
+                            direction, pos.get("ticket", "N/A"), check_price, entry,
+                            pos.get("sl_price", 0.0), pos.get("target_price", 0.0),
+                            emoji, est_profit
+                        )
 
                 _sleep_with_jitter(CONFIG["position_monitor_interval_s"])
                 continue

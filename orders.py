@@ -436,12 +436,37 @@ class OrderManager:
             deals = self._broker.get_deals_by_position(ticket)
             exit_price = pos["entry_price"]
             profit = 0.0
+            closing_deal = None
 
             if deals:
                 # The closing deal is the last deal associated with the position
                 closing_deal = deals[-1]
                 exit_price = closing_deal.price
                 profit = sum(d.profit for d in deals)
+
+            # Determine intelligent exit reason (Broker SL, Broker TP, or Manual/External exit)
+            exit_reason = "MANUAL_APP_EXIT"
+            deal_reason = getattr(closing_deal, "reason", None) if closing_deal else None
+            deal_comment = str(getattr(closing_deal, "comment", "")).lower() if closing_deal else ""
+
+            sl_price = pos.get("sl_price")
+            tp_price = pos.get("target_price")
+
+            # MT5 deal reasons: 3 = DEAL_REASON_SL, 4 = DEAL_REASON_TP, 5 = DEAL_REASON_SO
+            if deal_reason == 3 or "[sl]" in deal_comment or "sl" in deal_comment:
+                exit_reason = "BROKER_SL_HIT"
+            elif deal_reason == 4 or "[tp]" in deal_comment or "tp" in deal_comment:
+                exit_reason = "BROKER_TP_HIT"
+            elif sl_price is not None and (
+                (pos["direction"] == "SHORT" and exit_price >= (sl_price - 1.00)) or
+                (pos["direction"] == "LONG" and exit_price <= (sl_price + 1.00))
+            ):
+                exit_reason = "BROKER_SL_HIT"
+            elif tp_price is not None and (
+                (pos["direction"] == "SHORT" and exit_price <= (tp_price + 1.00)) or
+                (pos["direction"] == "LONG" and exit_price >= (tp_price - 1.00))
+            ):
+                exit_reason = "BROKER_TP_HIT"
 
             # Reconcile strategy state
             state["in_position"] = False
@@ -467,7 +492,7 @@ class OrderManager:
                 "gross_pnl": profit,
                 "net_pnl": profit,
                 "pnl_percent": round((profit / (pos.get("risk", 1.0) * pos["lot_size"] * 100)) * 100, 2) if pos.get("risk") else 0,
-                "exit_reason": "MANUAL_APP_EXIT",
+                "exit_reason": exit_reason,
                 "mode": self._mode,
             })
 
@@ -476,13 +501,13 @@ class OrderManager:
 
             emoji = "🟢" if profit >= 0 else "🔴"
             log.info(
-                f"[SYNC] 🔔 External Exit Detected: Ticket {ticket} closed externally in MT5 | "
+                f"[SYNC] 🔔 External Exit Detected: Ticket {ticket} closed on MT5 ({exit_reason}) | "
                 f"Entry: ${pos['entry_price']:.2f} → Exit: ${exit_price:.2f} | "
                 f"P&L: {emoji} ${profit:+,.2f} | Day P&L: ${state['realized_pnl_today']:+,.2f}. "
                 f"State synchronized! Resuming candle monitoring."
             )
             log_trades.info(
-                f"[EXTERNAL EXIT] {pos['direction']} (MANUAL_APP_EXIT) | "
+                f"[EXTERNAL EXIT] {pos['direction']} ({exit_reason}) | "
                 f"Entry: ${pos['entry_price']:.2f} | Exit: ${exit_price:.2f} | P&L: ${profit:+,.2f}"
             )
 
@@ -494,7 +519,7 @@ class OrderManager:
                         entry_price=pos["entry_price"],
                         exit_price=exit_price,
                         pnl=profit,
-                        reason="MANUAL_APP_EXIT",
+                        reason=exit_reason,
                     )
                 except Exception as e:
                     log.warning("[SYNC] ⚠️ Failed to send Telegram alert for external exit: %s", e)
