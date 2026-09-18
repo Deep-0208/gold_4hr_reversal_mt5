@@ -101,16 +101,22 @@ def _candle_summary(label: str, c: Dict[str, Any]) -> str:
 
 
 # ─────────────────────────────────────────────
-# C2.OPEN INSIDE C1.BODY — Tolerance-Banded Check
+# C2 BODY OVERLAPS C1 BODY — U-Shape Tolerance Check
 # ─────────────────────────────────────────────
 
-def _c2_open_inside_c1_body(c1: Dict[str, Any], c2: Dict[str, Any]) -> bool:
+def _c2_body_overlaps_c1_body(c1: Dict[str, Any], c2: Dict[str, Any]) -> bool:
     """
-    Check whether C2's open price falls inside C1's body, with a
-    configurable tolerance band clamped by a noise floor.
+    Check whether C2's body connects with C1's body (U-Shape validation).
+
+    Valid if EITHER C2.open OR C2.close falls inside C1's body
+    (with a configurable tolerance band clamped by a noise floor).
+
+    This captures true U-shape absorption reversals where C2 gaps
+    below/above C1 but closes back inside C1's body range.
 
     The check is:
-      (body_bottom - tolerance) <= c2.open <= (body_top + tolerance)
+      (body_bottom - tolerance) <= c2.open  <= (body_top + tolerance)  OR
+      (body_bottom - tolerance) <= c2.close <= (body_top + tolerance)
     where tolerance = max(TOLERANCE_PCT × C1.range, MIN_TOLERANCE_PTS).
     """
     c1_bt = body_top(c1)
@@ -124,15 +130,21 @@ def _c2_open_inside_c1_body(c1: Dict[str, Any], c2: Dict[str, Any]) -> bool:
     upper = c1_bt + tolerance
 
     c2_open = c2["open"]
-    is_valid = lower <= c2_open <= upper
+    c2_close = c2["close"]
+    open_inside = lower <= c2_open <= upper
+    close_inside = lower <= c2_close <= upper
+    is_valid = open_inside or close_inside
 
+    matched_on = "open" if open_inside else ("close" if close_inside else "neither")
     log_pattern.debug(
-        "  C2.open check: c2.open=$%.2f | C1 body=[$%.2f - $%.2f] | "
-        "tolerance=$%.2f (max(%.1f%% of range $%.2f, $%.1f floor)) | bounds=[$%.2f - $%.2f] | %s",
-        c2_open, c1_bb, c1_bt,
+        "  C2 body overlap: c2.open=$%.2f c2.close=$%.2f | C1 body=[$%.2f - $%.2f] | "
+        "tolerance=$%.2f (max(%.1f%% of range $%.2f, $%.1f floor)) | bounds=[$%.2f - $%.2f] | "
+        "%s (matched on %s)",
+        c2_open, c2_close, c1_bb, c1_bt,
         tolerance, tolerance_pct * 100, c1_range, min_tolerance_pts,
         lower, upper,
-        "✓ INSIDE" if is_valid else "✗ OUTSIDE"
+        "✓ INSIDE" if is_valid else "✗ OUTSIDE",
+        matched_on,
     )
     return is_valid
 
@@ -188,10 +200,10 @@ def detect_bullish_setup(
     log_pattern.debug("  ✓ C3 is green")
 
     # ② C2.open must be inside C1's body (with tolerance band)
-    if not _c2_open_inside_c1_body(c1, c2):
-        log_pattern.debug("  ✗ BULLISH FAIL: C2.open not inside C1 body (with tolerance)")
+    if not _c2_body_overlaps_c1_body(c1, c2):
+        log_pattern.debug("  ✗ BULLISH FAIL: C2 body does not overlap C1 body (with tolerance)")
         return None
-    log_pattern.debug("  ✓ C2.open is inside C1 body")
+    log_pattern.debug("  ✓ C2 body overlaps C1 body")
 
     # ③ Pattern matching — determine color combo and exclude all-same-color momentum
     c1_bt = body_top(c1)
@@ -338,10 +350,10 @@ def detect_bearish_setup(
     log_pattern.debug("  ✓ C3 is red")
 
     # ② C2.open must be inside C1's body (with tolerance band)
-    if not _c2_open_inside_c1_body(c1, c2):
-        log_pattern.debug("  ✗ BEARISH FAIL: C2.open not inside C1 body (with tolerance)")
+    if not _c2_body_overlaps_c1_body(c1, c2):
+        log_pattern.debug("  ✗ BEARISH FAIL: C2 body does not overlap C1 body (with tolerance)")
         return None
-    log_pattern.debug("  ✓ C2.open is inside C1 body")
+    log_pattern.debug("  ✓ C2 body overlaps C1 body")
 
     # ③ Pattern matching — determine color combo and exclude all-same-color momentum
     c1_red = is_bearish(c1)
@@ -506,8 +518,10 @@ def format_pattern_eval_summary(
             # Check C2 inside C1 body tolerance
             c1_range = c1["high"] - c1["low"]
             tol = max(c1_range * CONFIG.get("c2_open_tolerance_pct", 0.05), CONFIG.get("c2_open_min_tolerance_pts", 1.0))
-            if not ((c1_bb - tol) <= c2["open"] <= (c1_bt + tol)):
-                reasons.append(f"C2.open (${c2['open']:.2f}) outside C1 body bounds [${c1_bb-tol:.2f} - ${c1_bt+tol:.2f}]")
+            c2_open_inside = (c1_bb - tol) <= c2["open"] <= (c1_bt + tol)
+            c2_close_inside = (c1_bb - tol) <= c2["close"] <= (c1_bt + tol)
+            if not (c2_open_inside or c2_close_inside):
+                reasons.append(f"C2 body (open=${c2['open']:.2f}, close=${c2['close']:.2f}) outside C1 body bounds [${c1_bb-tol:.2f} - ${c1_bt+tol:.2f}]")
             else:
                 if is_bullish(c3):
                     if is_bullish(c1) and is_bullish(c2):
@@ -570,14 +584,16 @@ def evaluate_prospective_setup(
 
     c1_range = c1["high"] - c1["low"]
     tol = max(c1_range * CONFIG.get("c2_open_tolerance_pct", 0.05), CONFIG.get("c2_open_min_tolerance_pts", 1.0))
-    c2_inside = (c1_bb - tol) <= c2["open"] <= (c1_bt + tol)
+    c2_open_inside = (c1_bb - tol) <= c2["open"] <= (c1_bt + tol)
+    c2_close_inside = (c1_bb - tol) <= c2["close"] <= (c1_bt + tol)
+    c2_inside = c2_open_inside or c2_close_inside
 
     if not c2_inside:
         return {
             "is_candidate": False,
             "direction": "",
             "pattern_name": "",
-            "message": f"Normal continuation (C2.open outside C1 tolerance band)"
+            "message": f"Normal continuation (C2 body outside C1 tolerance band)"
         }
 
     # Prospective Bullish Check (Patterns 1, 2, 3 — excludes 🟢🟢🟢)

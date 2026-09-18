@@ -27,6 +27,8 @@ backtest_report.txt
 backtest_report_comprehensive.md
 backtest_trades.csv
 calc_stats.py
+compare_c2_rules.py
+discover_missed_patterns.py
 forensic_analysis.py
 forensic_report.md
 forensic_trades.csv
