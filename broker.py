@@ -111,20 +111,66 @@ class MT5Broker:
                 info.leverage, info.server
             )
 
-        # Detect broker server timezone offset relative to UTC
-        tick = mt5.symbol_info_tick(self._symbol)
-        if tick:
-            now_utc = datetime.now(timezone.utc)
-            server_dt = datetime.fromtimestamp(tick.time, timezone.utc)
-            self._server_offset_hours = round((server_dt - now_utc).total_seconds() / 3600)
-            log.info(
-                "[BROKER] 🕒 Broker server offset detected: UTC%+d hours | "
-                "Server Time: %s | Local Time: %s IST",
-                self._server_offset_hours,
-                server_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                now_ist().strftime("%Y-%m-%d %H:%M:%S")
-            )
+        # Detect broker server timezone offset relative to UTC (with weekend/stale-tick safeguard)
+        self._detect_server_offset()
         return True
+
+    def _detect_server_offset(self) -> int:
+        """
+        Detect broker server timezone offset relative to UTC.
+
+        Safeguards:
+          - If booted on a weekend or after market close, tick.time is stale (> 2h old).
+            Computing (tick.time - now_utc) would produce a massive negative offset (e.g. -39h).
+          - Valid broker server offsets are strictly between 0 and +4 hours (typically UTC+2 or UTC+3).
+          - If tick is stale or out of bounds, default to UTC+3 (standard Exness/Forex server time).
+        """
+        if not IS_WINDOWS:
+            self._server_offset_hours = 3
+            return 3
+
+        tick = mt5.symbol_info_tick(self._symbol)
+        if tick and tick.time > 0:
+            now_utc = datetime.now(timezone.utc)
+            tick_dt = datetime.fromtimestamp(tick.time, timezone.utc)
+            age_seconds = (now_utc - tick_dt).total_seconds()
+
+            if age_seconds < 7200:  # Fresh tick within last 2 hours
+                detected = round((tick_dt - now_utc).total_seconds() / 3600)
+                if 0 <= detected <= 4:
+                    self._server_offset_hours = detected
+                    log_broker.info(
+                        "[BROKER] 🕒 Broker server offset detected: UTC%+d hours | "
+                        "Server Time: %s | Local Time: %s IST",
+                        self._server_offset_hours,
+                        tick_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        now_ist().strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                    return self._server_offset_hours
+
+            # Stale tick or out of bounds -> fallback to UTC+3
+            log_broker.warning(
+                "[BROKER] ⚠️ Stale tick detected (age=%.0fs / %.1fh). "
+                "Defaulting server offset to UTC+3 (will refresh on first fresh tick).",
+                age_seconds, age_seconds / 3600
+            )
+
+        self._server_offset_hours = 3  # Standard default UTC+3
+        log_broker.info("[BROKER] 🕒 Server offset set to default: UTC%+d hours", self._server_offset_hours)
+        return self._server_offset_hours
+
+    def refresh_server_offset(self) -> None:
+        """Refresh server offset if currently on fallback."""
+        if hasattr(self, "_server_offset_hours") and self._server_offset_hours == 3:
+            tick = mt5.symbol_info_tick(self._symbol) if IS_WINDOWS else None
+            if tick and tick.time > 0:
+                now_utc = datetime.now(timezone.utc)
+                tick_dt = datetime.fromtimestamp(tick.time, timezone.utc)
+                if (now_utc - tick_dt).total_seconds() < 300:  # Live tick within 5 minutes
+                    detected = round((tick_dt - now_utc).total_seconds() / 3600)
+                    if 0 <= detected <= 4 and detected != self._server_offset_hours:
+                        self._server_offset_hours = detected
+                        log_broker.info("[BROKER] 🕒 Server offset dynamically updated to UTC%+d hours", detected)
 
     def disconnect(self) -> None:
         """Cleanly shutdown MT5 connection."""
@@ -530,43 +576,61 @@ class MT5Broker:
 
         pos = position[0]
         # Determine close direction (opposite of open)
-        if pos.type == mt5.ORDER_TYPE_BUY:
-            close_type = mt5.ORDER_TYPE_SELL
-            price = mt5.symbol_info_tick(self._symbol).bid
-        else:
-            close_type = mt5.ORDER_TYPE_BUY
-            price = mt5.symbol_info_tick(self._symbol).ask
+        close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        deviation = int(CONFIG.get("close_deviation_points", 50))
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": self._symbol,
-            "volume": pos.volume,
-            "type": close_type,
-            "position": ticket,
-            "price": price,
-            "deviation": 20,
-            "magic": self._magic,
-            "comment": "Gold4HR_Close",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
+        # Retry loop (up to 3 attempts with fresh ticks)
+        for attempt in range(1, 4):
+            tick = mt5.symbol_info_tick(self._symbol)
+            if not tick:
+                time.sleep(0.2)
+                continue
 
-        result = mt5.order_send(request)
+            price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
 
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": self._symbol,
+                "volume": pos.volume,
+                "type": close_type,
+                "position": ticket,
+                "price": price,
+                "deviation": deviation,
+                "magic": self._magic,
+                "comment": "Gold4HR_Close",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+
+            result = mt5.order_send(request)
+
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                log_broker.info(
+                    "[BROKER] ✅ Position CLOSED (attempt #%d): ticket=%d | Close price=$%.2f | P&L=$%.2f",
+                    attempt, ticket, result.price, pos.profit
+                )
+                return True
+
             retcode = result.retcode if result else "None"
             comment = result.comment if result else mt5.last_error()
-            log_broker.error(
-                "[BROKER] ❌ Position CLOSE FAILED: ticket=%d, retcode=%s, comment='%s'",
-                ticket, retcode, comment
+            log_broker.warning(
+                "[BROKER] ⚠️ Close attempt #%d/3 failed: ticket=%d, retcode=%s, comment='%s'",
+                attempt, ticket, retcode, comment
             )
-            return False
 
-        log_broker.info(
-            "[BROKER] ✅ Position CLOSED: ticket=%d | Close price=$%.2f | P&L=$%.2f",
-            ticket, result.price, pos.profit
+            # Check if position was closed in the meantime (e.g. by broker SL/TP)
+            remaining = mt5.positions_get(ticket=ticket)
+            if not remaining:
+                log_broker.info("[BROKER] ✅ Position ticket=%d confirmed closed externally during close attempt.", ticket)
+                return True
+
+            time.sleep(0.25)
+
+        log_broker.error(
+            "[BROKER] ❌ All 3 close attempts failed for ticket=%d. Position may require manual or server SL intervention.",
+            ticket
         )
-        return True
+        return False
 
     # ─────────────────────────────────────────
     # POSITION QUERY

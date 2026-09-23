@@ -367,12 +367,13 @@ def run_strategy():
 
                 tick = broker.get_tick()
                 if tick:
+                    broker.refresh_server_offset()
                     pos = state["current_position"]
                     direction = pos["direction"]
                     # Use bid for LONG exit check, ask for SHORT exit check
                     check_price = tick.bid if direction == "LONG" else tick.ask
 
-                    exited = order_mgr.check_exit_conditions(state, check_price)
+                    exited = order_mgr.check_exit_conditions(state, check_price, tick=tick)
                     if exited:
                         last_in_position_hb_time = 0.0
                         log.info("[POSITION] Position exited. Resuming candle monitoring.")
@@ -390,23 +391,26 @@ def run_strategy():
                             pos["last_heartbeat"] = now.isoformat()
                             save_state(state)
 
-                    # Periodic in-trade heartbeat log (every 15 minutes) for server observability
+                    # Periodic in-trade heartbeat log (every 5 minutes) for server observability
                     now_ts = time.time()
-                    if (now_ts - last_in_position_hb_time) >= 900:
+                    hb_interval = CONFIG.get("in_position_heartbeat_interval_s", 300)
+                    if (now_ts - last_in_position_hb_time) >= hb_interval:
                         last_in_position_hb_time = now_ts
                         entry = pos.get("entry_price", 0.0)
                         diff = (check_price - entry) if direction == "LONG" else (entry - check_price)
                         est_profit = diff * pos.get("lot_size", CONFIG.get("lot_size", 0.01)) * 100.0
                         emoji = "🟢" if est_profit >= 0 else "🔴"
                         log.info(
-                            "[IN POSITION] ⏳ Monitoring %s ticket #%s | Current: $%.2f | Entry: $%.2f | "
-                            "SL: $%.2f | TP: $%.2f | Est. P&L: %s $%.2f",
-                            direction, pos.get("ticket", "N/A"), check_price, entry,
-                            pos.get("sl_price", 0.0), pos.get("target_price", 0.0),
+                            "[IN POSITION] ⏳ Monitoring %s ticket #%s | Current Tick: $%.2f (Bid: $%.2f | Ask: $%.2f | Spread: $%.2f) | "
+                            "Entry: $%.2f | SL: $%.2f | TP: $%.2f | Est. P&L: %s $%.2f",
+                            direction, pos.get("ticket", "N/A"), check_price, tick.bid, tick.ask, tick.spread,
+                            entry, pos.get("sl_price", 0.0), pos.get("target_price", 0.0),
                             emoji, est_profit
                         )
 
-                _sleep_with_jitter(CONFIG["position_monitor_interval_s"])
+                poll_interval = CONFIG.get("position_monitor_interval_s", 0.5)
+                poll_jitter = CONFIG.get("position_monitor_jitter_s", 0.1)
+                _sleep_with_jitter(poll_interval, jitter=poll_jitter)
                 continue
 
             # ── Check H4 candle status from MT5 broker ──

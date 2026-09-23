@@ -92,7 +92,12 @@ CONFIG = {
     "tsl_activation_rr": 1.0,        # R:R at which TSL activates (1.0R)
     "tsl_floor_rr": 1.0,             # Hard floor R:R locked upon activation (+1.0R guaranteed profit)
     "tsl_trail_rr_fraction": 0.2,    # Trailing distance = 0.20 × Risk
+    "tsl_min_step_dollars": 0.50,    # Minimum $0.50 ratchet step to prevent broker spam & log flooding
     "max_target_rr": 4.0,            # Hard exit R:R ceiling (4.0R)
+
+    # ── Dollar Risk Cap ──────────────────────────
+    # 0 = disabled (only active if set to a positive dollar value, e.g. 40.0)
+    "max_risk_dollars": 0,
 
     # ── SL placement ────────────────────────────
     # Buffer in dollars added beyond the 3-candle extreme for SL placement.
@@ -100,8 +105,7 @@ CONFIG = {
     "sl_buffer_dollars": 0.50,
 
     # ── Daily drawdown kill-switch ───────────────
-    # 0 = disabled. Set to a positive $ value (e.g. 500) to halt
-    # trading for the day once realized losses exceed this amount.
+    # 0 = disabled. Halts trading for the day once realized losses reach this threshold.
     "max_daily_loss": 0,
 
     # ── Spread guard ─────────────────────────────
@@ -134,13 +138,16 @@ CONFIG = {
     "starting_capital": 100000.0,
 
     # ── Monitoring loop intervals ────────────────
-    "candle_poll_interval_s": 30,          # seconds between candle-close checks
-    "position_monitor_interval_s": 5,      # seconds between tick checks when in position
+    "candle_poll_interval_s": 30,             # seconds between candle-close checks
+    "position_monitor_interval_s": 0.5,       # sub-second tick evaluation when in position (500ms)
+    "position_monitor_jitter_s": 0.1,         # micro-jitter in seconds
+    "in_position_heartbeat_interval_s": 300,  # 5 minutes between in-trade status logs
 
-    # ── MT5 Magic Number ─────────────────────────
+    # ── MT5 Execution Parameters ─────────────────
     # Unique identifier to tag all orders from this strategy.
     # Prevents conflicts with manual trades or other EAs on the same account.
     "magic_number": 444001,
+    "close_deviation_points": 50,             # Slippage tolerance in points for market close (50 = $0.50)
 
     # ── Logging ──────────────────────────────────
     "log_level": "INFO",                   # INFO for production

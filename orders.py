@@ -268,6 +268,7 @@ class OrderManager:
             emoji = "🟢" if pnl >= 0 else "🔴"
             log.info(
                 f"[ORDER EXEC] {emoji} {self._mode} {direction} EXIT ({reason}) | "
+                f"Trigger Tick Price: ${exit_price:.2f} | "
                 f"Entry: ${entry_price:.2f} → Exit: ${exit_price:.2f} | "
                 f"P&L: ${pnl:+,.2f} | Day P&L: ${state['realized_pnl_today']:+,.2f}"
             )
@@ -388,11 +389,13 @@ class OrderManager:
 
         current_sl = pos.get("sl_price", 0)
 
-        # Only move SL in the favorable direction
+        # Only move SL in the favorable direction if step threshold is met
+        # (prevents broker rate-limit violations and log flooding)
+        min_step = float(CONFIG.get("tsl_min_step_dollars", 0.50))
         should_update = False
-        if direction == "LONG" and new_sl > current_sl:
+        if direction == "LONG" and (new_sl - current_sl) >= min_step:
             should_update = True
-        elif direction == "SHORT" and new_sl < current_sl:
+        elif direction == "SHORT" and (current_sl - new_sl) >= min_step:
             should_update = True
 
         if should_update:
@@ -472,15 +475,16 @@ class OrderManager:
             tp_price = pos.get("target_price")
 
             # MT5 deal reasons: 3 = DEAL_REASON_SL, 4 = DEAL_REASON_TP, 5 = DEAL_REASON_SO
-            if deal_reason == 3 or "[sl]" in deal_comment or "sl" in deal_comment:
-                exit_reason = "BROKER_SL_HIT"
+            is_sl_deal = deal_reason == 3 or "[sl]" in deal_comment or "sl" in deal_comment
+            if is_sl_deal:
+                exit_reason = "TRAILING_SL_HIT" if (profit > 0 or pos.get("tsl_active")) else "BROKER_SL_HIT"
             elif deal_reason == 4 or "[tp]" in deal_comment or "tp" in deal_comment:
                 exit_reason = "BROKER_TP_HIT"
             elif sl_price is not None and (
                 (pos["direction"] == "SHORT" and exit_price >= (sl_price - 1.00)) or
                 (pos["direction"] == "LONG" and exit_price <= (sl_price + 1.00))
             ):
-                exit_reason = "BROKER_SL_HIT"
+                exit_reason = "TRAILING_SL_HIT" if (profit > 0 or pos.get("tsl_active")) else "BROKER_SL_HIT"
             elif tp_price is not None and (
                 (pos["direction"] == "SHORT" and exit_price <= (tp_price + 1.00)) or
                 (pos["direction"] == "LONG" and exit_price >= (tp_price - 1.00))
@@ -519,8 +523,10 @@ class OrderManager:
             save_state(state)
 
             emoji = "🟢" if profit >= 0 else "🔴"
+            deal_time_str = datetime.fromtimestamp(closing_deal.time, timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST") if (closing_deal and getattr(closing_deal, "time", None)) else "N/A"
             log.info(
                 f"[SYNC] 🔔 External Exit Detected: Ticket {ticket} closed on MT5 ({exit_reason}) | "
+                f"Fill Tick Price: ${exit_price:.2f} | Deal Time: {deal_time_str} | "
                 f"Entry: ${pos['entry_price']:.2f} → Exit: ${exit_price:.2f} | "
                 f"P&L: {emoji} ${profit:+,.2f} | Day P&L: ${state['realized_pnl_today']:+,.2f}. "
                 f"State synchronized! Resuming candle monitoring."
@@ -562,6 +568,7 @@ class OrderManager:
         self,
         state: Dict[str, Any],
         current_price: float,
+        tick: Optional[Any] = None,
     ) -> bool:
         """
         Check if the current position should be exited based on
@@ -569,7 +576,8 @@ class OrderManager:
 
         Args:
             state:         mutable strategy state dict
-            current_price: latest Gold price
+            current_price: latest Gold price (bid for LONG, ask for SHORT)
+            tick:          optional TickData object for forensic exit tick logging
 
         Returns:
             True if position was exited, False if still open.
@@ -582,15 +590,24 @@ class OrderManager:
         sl = pos.get("sl_price", 0)
         tp = pos.get("target_price", 0)
 
+        tick_str = f" (Bid=${tick.bid:.2f} | Ask=${tick.ask:.2f} | Spread=${tick.spread:.2f})" if tick else ""
+        time_str = f" at {tick.time.strftime('%Y-%m-%d %H:%M:%S UTC')}" if (tick and getattr(tick, "time", None)) else ""
+
         # Check SL hit (or trailed SL hit)
         if direction == "LONG" and current_price <= sl:
             exit_reason = "TSL_HIT" if pos.get("tsl_active") else "SL_HIT"
-            log.info(f"[EXIT] 🛑 {exit_reason}: Price ${current_price:.2f} <= SL ${sl:.2f}")
+            log.info(
+                f"[EXIT TRIGGER] 🛑 {exit_reason} TRIGGERED | Exit Tick: Price=${current_price:.2f}{tick_str}{time_str} | "
+                f"Threshold: SL=${sl:.2f}"
+            )
             return self.exit_trade(state, current_price, exit_reason)
 
         if direction == "SHORT" and current_price >= sl:
             exit_reason = "TSL_HIT" if pos.get("tsl_active") else "SL_HIT"
-            log.info(f"[EXIT] 🛑 {exit_reason}: Price ${current_price:.2f} >= SL ${sl:.2f}")
+            log.info(
+                f"[EXIT TRIGGER] 🛑 {exit_reason} TRIGGERED | Exit Tick: Price=${current_price:.2f}{tick_str}{time_str} | "
+                f"Threshold: SL=${sl:.2f}"
+            )
             return self.exit_trade(state, current_price, exit_reason)
 
         # In TSL mode: evaluate TSL activation, trailing, and max target ceiling
@@ -601,11 +618,17 @@ class OrderManager:
 
         # In Fixed Target mode (only if TSL is disabled)
         if direction == "LONG" and current_price >= tp:
-            log.info(f"[EXIT] 🎯 TARGET HIT: Price ${current_price:.2f} >= TP ${tp:.2f}")
+            log.info(
+                f"[EXIT TRIGGER] 🎯 TARGET HIT TRIGGERED | Exit Tick: Price=${current_price:.2f}{tick_str}{time_str} | "
+                f"Threshold: TP=${tp:.2f}"
+            )
             return self.exit_trade(state, current_price, "TP_HIT")
 
         if direction == "SHORT" and current_price <= tp:
-            log.info(f"[EXIT] 🎯 TARGET HIT: Price ${current_price:.2f} <= TP ${tp:.2f}")
+            log.info(
+                f"[EXIT TRIGGER] 🎯 TARGET HIT TRIGGERED | Exit Tick: Price=${current_price:.2f}{tick_str}{time_str} | "
+                f"Threshold: TP=${tp:.2f}"
+            )
             return self.exit_trade(state, current_price, "TP_HIT")
 
         return False

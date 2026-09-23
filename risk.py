@@ -178,6 +178,23 @@ def calculate_sl_target(
             skip_reason=f"Unknown trade direction: '{direction}'",
         )
 
+    # Sanity Guard 3: Max dollar risk cap (disabled if 0, active only if > 0)
+    max_risk_dollars = float(CONFIG.get("max_risk_dollars", 0))
+    if max_risk_dollars > 0 and risk > max_risk_dollars:
+        skip_msg = f"Risk (${risk:.2f}) exceeds max dollar risk limit (${max_risk_dollars:.2f})"
+        log_risk.warning("[RISK] ⚠️ %s", skip_msg)
+        return RiskParams(
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=sl_price,
+            target_price=tp_price,
+            risk=risk,
+            is_valid=False,
+            skip_reason=skip_msg,
+            rr_ratio=rr,
+            max_target_price=max_target_price,
+        )
+
     log_risk.info(
         "[RISK] ✅ Setup validated: %s | Entry: $%.2f | SL: $%.2f | TP: $%.2f | "
         "Risk: $%.2f (%.2f%%) | R:R: 1:%.1f | MaxTP: $%.2f",
