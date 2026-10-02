@@ -14,9 +14,9 @@ Thread-safe: all order operations are protected by trade_lock.
 
 import threading
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
-from config import CONFIG, log, log_orders, log_trades, log_event, now_ist
+from config import CONFIG, log, log_orders, log_trades, log_event, now_ist, IST
 from broker import MT5Broker, TickData
 from risk import RiskParams, calculate_dollar_pnl
 from state import save_state, append_trade_journal
@@ -523,7 +523,10 @@ class OrderManager:
             save_state(state)
 
             emoji = "🟢" if profit >= 0 else "🔴"
-            deal_time_str = datetime.fromtimestamp(closing_deal.time, timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST") if (closing_deal and getattr(closing_deal, "time", None)) else "N/A"
+            if closing_deal and getattr(closing_deal, "time", None):
+                deal_time_str = datetime.fromtimestamp(closing_deal.time, timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+            else:
+                deal_time_str = now.strftime("%Y-%m-%d %H:%M:%S IST")
             log.info(
                 f"[SYNC] 🔔 External Exit Detected: Ticket {ticket} closed on MT5 ({exit_reason}) | "
                 f"Fill Tick Price: ${exit_price:.2f} | Deal Time: {deal_time_str} | "

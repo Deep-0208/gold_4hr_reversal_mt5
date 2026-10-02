@@ -21,7 +21,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from config import CONFIG, IST, now_ist, now_utc, log_candle_csv
+from config import CONFIG, IST, now_ist, now_utc
 from broker import MT5Broker
 from pattern import (
     detect_setup, format_pattern_eval_summary, evaluate_prospective_setup,
@@ -146,24 +146,7 @@ class TestGold4HrReversal(unittest.TestCase):
 
         print("✓ Prospective setup evaluation detected valid prospective candidates for Pattern 2 & 5.")
 
-    def test_05_csv_candle_logging(self):
-        """Verify that log_candle_csv formats rows properly."""
-        test_candle = {
-            "date": datetime(2026, 9, 14, 18, 30, tzinfo=IST),
-            "date_utc": datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc),
-            "open": 4271.0,
-            "high": 4317.79,
-            "low": 4253.48,
-            "close": 4315.76,
-            "volume": 45210,
-        }
-        # Call log_candle_csv without error
-        log_candle_csv("COMPLETED_H4", "XAUUSD", test_candle)
-        today_str = now_ist().strftime("%Y-%m-%d")
-        csv_path = PROJECT_DIR / "logs" / today_str / "candles.csv"
-        self.assertTrue(csv_path.exists())
-        self.assertGreater(csv_path.stat().st_size, 100)
-        print(f"\n✓ candles.csv validated at {csv_path} (size: {csv_path.stat().st_size} bytes).")
+
 
     def test_06_risk_parameters_and_pnl(self):
         """Verify SL/Target calculation, sanity guards, and P&L math."""

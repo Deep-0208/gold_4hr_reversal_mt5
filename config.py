@@ -164,7 +164,6 @@ CONFIG = {
 #   strategy.log    — Main strategy flow (INFO+)
 #   debug.log       — Full debug trace (DEBUG+)
 #   trades.log      — Entries, exits, P&L only
-#   candles.csv     — Every candle in CSV for analysis
 #
 # Trade journal is maintained across days:
 #   logs/journal.csv
@@ -306,14 +305,12 @@ def rollover_logging(new_date_str: str) -> None:
 
         root_logger = logging.getLogger(LOGGER_NAME)
         trade_logger = logging.getLogger(f"{LOGGER_NAME}.trades")
-        candle_logger = logging.getLogger(f"{LOGGER_NAME}.candles")
         network_logger = logging.getLogger(f"{LOGGER_NAME}.network")
         broker_logger = logging.getLogger(f"{LOGGER_NAME}.broker")
 
         # 1. Remove old file handlers cleanly
         _remove_file_handlers(root_logger)
         _remove_file_handlers(trade_logger)
-        _remove_file_handlers(candle_logger)
         _remove_file_handlers(network_logger)
         _remove_file_handlers(broker_logger)
 
@@ -344,24 +341,6 @@ def rollover_logging(new_date_str: str) -> None:
         trade_fh.setFormatter(_make_formatter(include_module=False))
         trade_logger.addHandler(trade_fh)
 
-        # 4. Candle CSV logger
-        candle_fh = AutoFlushFileHandler(
-            daily_log_dir / "candles.csv",
-            mode="a",
-            encoding="utf-8",
-        )
-        candle_fh.setLevel(logging.INFO)
-        candle_fh.setFormatter(logging.Formatter("%(message)s"))
-        candle_logger.addHandler(candle_fh)
-
-        # Write CSV header if file is new/empty
-        candle_csv = daily_log_dir / "candles.csv"
-        if not candle_csv.exists() or candle_csv.stat().st_size == 0:
-            candle_logger.info(
-                "timestamp_ist,timestamp_utc,type,symbol,open,high,low,close,volume,"
-                "is_bullish,is_bearish,body_size,upper_wick,lower_wick"
-            )
-
         # 5. Dedicated Network & MT5 Broker API log (DEBUG+)
         # Receives all MT5 API calls, rates fetching, tick polling, and connection status
         network_fh = AutoFlushRotatingFileHandler(
@@ -384,7 +363,6 @@ def flush_all_logs() -> None:
         for name in (
             LOGGER_NAME,
             f"{LOGGER_NAME}.trades",
-            f"{LOGGER_NAME}.candles",
             f"{LOGGER_NAME}.network",
             f"{LOGGER_NAME}.broker",
             f"{LOGGER_NAME}.pattern",
@@ -462,7 +440,6 @@ def setup_logging() -> logging.Logger:
       Gold4HrReversal.orders   — order placement & exits
       Gold4HrReversal.broker   — MT5 broker API interactions
       Gold4HrReversal.trades   — trade-only filtered log
-      Gold4HrReversal.candles  — raw candle CSV log
       Gold4HrReversal.network  — isolated network/broker API log
     """
     root_logger = logging.getLogger(LOGGER_NAME)
@@ -482,8 +459,6 @@ def setup_logging() -> logging.Logger:
 
     trade_logger = logging.getLogger(f"{LOGGER_NAME}.trades")
     trade_logger.propagate = False
-    candle_logger = logging.getLogger(f"{LOGGER_NAME}.candles")
-    candle_logger.propagate = False
     network_logger = logging.getLogger(f"{LOGGER_NAME}.network")
     network_logger.propagate = False
 
@@ -499,53 +474,6 @@ log_risk = logging.getLogger(f"{LOGGER_NAME}.risk")
 log_orders = logging.getLogger(f"{LOGGER_NAME}.orders")
 log_broker = logging.getLogger(f"{LOGGER_NAME}.broker")
 log_trades = logging.getLogger(f"{LOGGER_NAME}.trades")
-log_candles = logging.getLogger(f"{LOGGER_NAME}.candles")
 log_network = logging.getLogger(f"{LOGGER_NAME}.network")
 
 
-# ─────────────────────────────────────────────
-# CANDLE LOGGING HELPER
-# ─────────────────────────────────────────────
-def log_candle_csv(
-    candle_type: str,
-    symbol: str,
-    candle: dict,
-) -> None:
-    """
-    Log a candle to the CSV file for post-session analysis.
-
-    Args:
-        candle_type: "COMPLETED_H4", "SPOT_SIGNAL" etc.
-        symbol: instrument symbol (e.g. "XAUUSD")
-        candle: dict with date, open, high, low, close, volume
-    """
-    if not candle:
-        return
-    o = float(candle.get("open") or 0.0)
-    h = float(candle.get("high") or 0.0)
-    l = float(candle.get("low") or 0.0)
-    c = float(candle.get("close") or 0.0)
-    body = abs(c - o)
-    upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
-    is_bull = "1" if c > o else "0"
-    is_bear = "1" if c < o else "0"
-    vol = candle.get("volume", candle.get("tick_volume", 0))
-
-    dt_ist = candle.get("date")
-    if hasattr(dt_ist, "strftime"):
-        ist_str = dt_ist.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        ist_str = str(dt_ist)
-
-    dt_utc = candle.get("date_utc")
-    if hasattr(dt_utc, "strftime"):
-        utc_str = dt_utc.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        utc_str = ist_str
-
-    log_candles.info(
-        f"{ist_str},{utc_str},{candle_type},{symbol},"
-        f"{o:.2f},{h:.2f},{l:.2f},{c:.2f},{vol},"
-        f"{is_bull},{is_bear},{body:.2f},{upper_wick:.2f},{lower_wick:.2f}"
-    )

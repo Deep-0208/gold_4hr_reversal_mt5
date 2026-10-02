@@ -473,7 +473,6 @@ def run_strategy():
                 )
                 log.info("═" * 80)
 
-                # ── Guaranteed write of every completed H4 candle to candles.csv ──
                 log_candle_csv("COMPLETED_H4", CONFIG["symbol"], latest_candle)
                 log_event("CANDLE_CLOSED", {
                     "period_start": dt_ist_str,
